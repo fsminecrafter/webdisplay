@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebDisplay</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#0a0a0a;overflow:hidden;font-family:monospace}
+  #wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;height:100%}
+  #canvas{image-rendering:pixelated;image-rendering:crisp-edges;cursor:crosshair;display:block}
+  #hud{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;
+       padding:6px 14px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);
+       color:#0f0;font-size:11px;z-index:100;transition:opacity .4s}
+  #hud.hide{opacity:0;pointer-events:none}
+  #status{display:flex;gap:12px;align-items:center}
+  .dot{width:8px;height:8px;border-radius:50%;background:#f00;display:inline-block;transition:background .3s}
+  .dot.on{background:#0f0;box-shadow:0 0 6px #0f0}
+  button{background:transparent;border:1px solid #0f08;color:#0f0;padding:2px 10px;
+         border-radius:3px;cursor:pointer;font-family:monospace;font-size:11px}
+  button:hover{background:#0f02}
+  #fps{opacity:.6}
+  #coords{opacity:.6;font-variant-numeric:tabular-nums;min-width:120px}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="status">
+    <span class="dot" id="dot"></span>
+    <span id="connlabel">Connecting…</span>
+    <span id="fps">-- fps</span>
+  </div>
+  <div id="coords">x:0 y:0</div>
+  <div>
+    <button id="btnFs">⛶ Fullscreen</button>
+    <button id="btnClip">📋 Sync Clipboard</button>
+  </div>
+</div>
+<div id="wrap"><canvas id="canvas"></canvas></div>
+
+<script>
+'use strict';
+/* ── state ─────────────────────────────────────────────────── */
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d', {alpha: false});
+const dot    = document.getElementById('dot');
+const connlabel = document.getElementById('connlabel');
+const fpsEl  = document.getElementById('fps');
+const coordsEl = document.getElementById('coords');
+const hudEl  = document.getElementById('hud');
+
+let ws = null;
+let canvasW = 640, canvasH = 480;
+let hudTimer = null;
+
+/* fps tracking */
+let frameCount = 0, lastFpsTime = performance.now();
+
+/* ── built-in 8×8 font (IBM CP437 subset, ASCII 32–126) ─────
+   Each character is 8 bytes, each byte = one row (MSB=left).
+   We only embed printable ASCII for size; extend as needed.   */
+const FONT8 = new Uint8Array([
+/* SP */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+/* !  */ 0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00,
+/* "  */ 0x36,0x36,0x00,0x00,0x00,0x00,0x00,0x00,
+/* #  */ 0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00,
+/* $  */ 0x0C,0x3E,0x03,0x1E,0x30,0x1F,0x0C,0x00,
+/* %  */ 0x00,0x63,0x33,0x18,0x0C,0x66,0x63,0x00,
+/* &  */ 0x1C,0x36,0x1C,0x6E,0x3B,0x33,0x6E,0x00,
+/* '  */ 0x06,0x06,0x03,0x00,0x00,0x00,0x00,0x00,
+/* (  */ 0x18,0x0C,0x06,0x06,0x06,0x0C,0x18,0x00,
+/* )  */ 0x06,0x0C,0x18,0x18,0x18,0x0C,0x06,0x00,
+/* *  */ 0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00,
+/* +  */ 0x00,0x0C,0x0C,0x3F,0x0C,0x0C,0x00,0x00,
+/* ,  */ 0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x06,
+/* -  */ 0x00,0x00,0x00,0x3F,0x00,0x00,0x00,0x00,
+/* .  */ 0x00,0x00,0x00,0x00,0x00,0x0C,0x0C,0x00,
+/* /  */ 0x60,0x30,0x18,0x0C,0x06,0x03,0x01,0x00,
+/* 0  */ 0x3E,0x63,0x73,0x7B,0x6F,0x67,0x3E,0x00,
+/* 1  */ 0x0C,0x0E,0x0C,0x0C,0x0C,0x0C,0x3F,0x00,
+/* 2  */ 0x1E,0x33,0x30,0x1C,0x06,0x33,0x3F,0x00,
+/* 3  */ 0x1E,0x33,0x30,0x1C,0x30,0x33,0x1E,0x00,
+/* 4  */ 0x38,0x3C,0x36,0x33,0x7F,0x30,0x78,0x00,
+/* 5  */ 0x3F,0x03,0x1F,0x30,0x30,0x33,0x1E,0x00,
+/* 6  */ 0x1C,0x06,0x03,0x1F,0x33,0x33,0x1E,0x00,
+/* 7  */ 0x3F,0x33,0x30,0x18,0x0C,0x0C,0x0C,0x00,
+/* 8  */ 0x1E,0x33,0x33,0x1E,0x33,0x33,0x1E,0x00,
+/* 9  */ 0x1E,0x33,0x33,0x3E,0x30,0x18,0x0E,0x00,
+/* :  */ 0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x00,
+/* ;  */ 0x00,0x0C,0x0C,0x00,0x00,0x0C,0x0C,0x06,
+/* <  */ 0x18,0x0C,0x06,0x03,0x06,0x0C,0x18,0x00,
+/* =  */ 0x00,0x00,0x3F,0x00,0x00,0x3F,0x00,0x00,
+/* >  */ 0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00,
+/* ?  */ 0x1E,0x33,0x30,0x18,0x0C,0x00,0x0C,0x00,
+/* @  */ 0x3E,0x63,0x7B,0x7B,0x7B,0x03,0x1E,0x00,
+/* A  */ 0x0C,0x1E,0x33,0x33,0x3F,0x33,0x33,0x00,
+/* B  */ 0x3F,0x66,0x66,0x3E,0x66,0x66,0x3F,0x00,
+/* C  */ 0x3C,0x66,0x03,0x03,0x03,0x66,0x3C,0x00,
+/* D  */ 0x1F,0x36,0x66,0x66,0x66,0x36,0x1F,0x00,
+/* E  */ 0x7F,0x46,0x16,0x1E,0x16,0x46,0x7F,0x00,
+/* F  */ 0x7F,0x46,0x16,0x1E,0x16,0x06,0x0F,0x00,
+/* G  */ 0x3C,0x66,0x03,0x03,0x73,0x66,0x7C,0x00,
+/* H  */ 0x33,0x33,0x33,0x3F,0x33,0x33,0x33,0x00,
+/* I  */ 0x1E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00,
+/* J  */ 0x78,0x30,0x30,0x30,0x33,0x33,0x1E,0x00,
+/* K  */ 0x67,0x66,0x36,0x1E,0x36,0x66,0x67,0x00,
+/* L  */ 0x0F,0x06,0x06,0x06,0x46,0x66,0x7F,0x00,
+/* M  */ 0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x00,
+/* N  */ 0x63,0x67,0x6F,0x7B,0x73,0x63,0x63,0x00,
+/* O  */ 0x1C,0x36,0x63,0x63,0x63,0x36,0x1C,0x00,
+/* P  */ 0x3F,0x66,0x66,0x3E,0x06,0x06,0x0F,0x00,
+/* Q  */ 0x1E,0x33,0x33,0x33,0x3B,0x1E,0x38,0x00,
+/* R  */ 0x3F,0x66,0x66,0x3E,0x36,0x66,0x67,0x00,
+/* S  */ 0x1E,0x33,0x07,0x0E,0x38,0x33,0x1E,0x00,
+/* T  */ 0x3F,0x2D,0x0C,0x0C,0x0C,0x0C,0x1E,0x00,
+/* U  */ 0x33,0x33,0x33,0x33,0x33,0x33,0x3F,0x00,
+/* V  */ 0x33,0x33,0x33,0x33,0x33,0x1E,0x0C,0x00,
+/* W  */ 0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00,
+/* X  */ 0x63,0x63,0x36,0x1C,0x1C,0x36,0x63,0x00,
+/* Y  */ 0x33,0x33,0x33,0x1E,0x0C,0x0C,0x1E,0x00,
+/* Z  */ 0x7F,0x63,0x31,0x18,0x4C,0x66,0x7F,0x00,
+/* [  */ 0x1E,0x06,0x06,0x06,0x06,0x06,0x1E,0x00,
+/* \  */ 0x03,0x06,0x0C,0x18,0x30,0x60,0x40,0x00,
+/* ]  */ 0x1E,0x18,0x18,0x18,0x18,0x18,0x1E,0x00,
+/* ^  */ 0x08,0x1C,0x36,0x63,0x00,0x00,0x00,0x00,
+/* _  */ 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,
+/* `  */ 0x0C,0x0C,0x18,0x00,0x00,0x00,0x00,0x00,
+/* a  */ 0x00,0x00,0x1E,0x30,0x3E,0x33,0x6E,0x00,
+/* b  */ 0x07,0x06,0x06,0x3E,0x66,0x66,0x3B,0x00,
+/* c  */ 0x00,0x00,0x1E,0x33,0x03,0x33,0x1E,0x00,
+/* d  */ 0x38,0x30,0x30,0x3e,0x33,0x33,0x6E,0x00,
+/* e  */ 0x00,0x00,0x1E,0x33,0x3f,0x03,0x1E,0x00,
+/* f  */ 0x1C,0x36,0x06,0x0f,0x06,0x06,0x0F,0x00,
+/* g  */ 0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x1F,
+/* h  */ 0x07,0x06,0x36,0x6E,0x66,0x66,0x67,0x00,
+/* i  */ 0x0C,0x00,0x0E,0x0C,0x0C,0x0C,0x1E,0x00,
+/* j  */ 0x30,0x00,0x30,0x30,0x30,0x33,0x33,0x1E,
+/* k  */ 0x07,0x06,0x66,0x36,0x1E,0x36,0x67,0x00,
+/* l  */ 0x0E,0x0C,0x0C,0x0C,0x0C,0x0C,0x1E,0x00,
+/* m  */ 0x00,0x00,0x33,0x7F,0x7F,0x6B,0x63,0x00,
+/* n  */ 0x00,0x00,0x1F,0x33,0x33,0x33,0x33,0x00,
+/* o  */ 0x00,0x00,0x1E,0x33,0x33,0x33,0x1E,0x00,
+/* p  */ 0x00,0x00,0x3B,0x66,0x66,0x3E,0x06,0x0F,
+/* q  */ 0x00,0x00,0x6E,0x33,0x33,0x3E,0x30,0x78,
+/* r  */ 0x00,0x00,0x3B,0x6E,0x66,0x06,0x0F,0x00,
+/* s  */ 0x00,0x00,0x3E,0x03,0x1E,0x30,0x1F,0x00,
+/* t  */ 0x08,0x0C,0x3E,0x0C,0x0C,0x2C,0x18,0x00,
+/* u  */ 0x00,0x00,0x33,0x33,0x33,0x33,0x6E,0x00,
+/* v  */ 0x00,0x00,0x33,0x33,0x33,0x1E,0x0C,0x00,
+/* w  */ 0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00,
+/* x  */ 0x00,0x00,0x63,0x36,0x1C,0x36,0x63,0x00,
+/* y  */ 0x00,0x00,0x33,0x33,0x33,0x3E,0x30,0x1F,
+/* z  */ 0x00,0x00,0x3F,0x19,0x0C,0x26,0x3F,0x00,
+/* {  */ 0x38,0x0C,0x0C,0x07,0x0C,0x0C,0x38,0x00,
+/* |  */ 0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00,
+/* }  */ 0x07,0x0C,0x0C,0x38,0x0C,0x0C,0x07,0x00,
+/* ~  */ 0x6E,0x3B,0x00,0x00,0x00,0x00,0x00,0x00,
+]);
+
+/* ── pixel-level text renderer using ImageData ──────────────── */
+function drawText8(x, y, rgb, text) {
+  const r=(rgb>>16)&0xff, g=(rgb>>8)&0xff, b=rgb&0xff;
+  const img = ctx.createImageData(text.length*8, 8);
+  const d = img.data;
+  for (let ci=0; ci<text.length; ci++) {
+    const cc = text.charCodeAt(ci) - 32;
+    if (cc < 0 || cc >= 95) continue;
+    for (let row=0; row<8; row++) {
+      const byte = FONT8[cc*8+row];
+      for (let bit=0; bit<8; bit++) {
+        if (byte & (0x80>>bit)) {
+          const idx = (row * text.length*8 + ci*8+bit)*4;
+          d[idx]=r; d[idx+1]=g; d[idx+2]=b; d[idx+3]=255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(img, x, y);
+}
+
+/* ── drawing dispatcher ─────────────────────────────────────── */
+function u16(v, o) { return (v[o]<<8)|v[o+1]; }
+function u32rgb(v, o) { return (v[o]<<16)|(v[o+1]<<8)|v[o+2]; }
+function cssrgb(v, o) {
+  return `rgb(${v[o]},${v[o+1]},${v[o+2]})`;
+}
+
+const OP = {
+  PIXEL:0x01, LINE:0x02, BOX:0x03, CIRCLE:0x04,
+  TRIANGLE:0x05, TEXT:0x06, BMP:0x07, CLEAR:0x08,
+  RESOLUTION:0x09, SET_CLIPBOARD:0x20
+};
+
+function dispatch(u8) {
+  const op = u8[0];
+  switch(op) {
+    case OP.PIXEL: {
+      const x=u16(u8,1),y=u16(u8,3);
+      ctx.fillStyle = cssrgb(u8,4);
+      ctx.fillRect(x,y,1,1);
+      break;
+    }
+    case OP.LINE: {
+      ctx.strokeStyle = cssrgb(u8,8);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(u16(u8,1)+.5, u16(u8,3)+.5);
+      ctx.lineTo(u16(u8,5)+.5, u16(u8,7)+.5);
+      ctx.stroke();
+      break;
+    }
+    case OP.BOX: {
+      const x=u16(u8,1),y=u16(u8,3),w=u16(u8,5),h=u16(u8,7);
+      const fill=u8[13];
+      if (fill) {
+        ctx.fillStyle = cssrgb(u8,9);
+        ctx.fillRect(x,y,w,h);
+      } else {
+        ctx.strokeStyle = cssrgb(u8,9);
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x+.5,y+.5,w,h);
+      }
+      break;
+    }
+    case OP.CIRCLE: {
+      const cx=u16(u8,1),cy=u16(u8,3),r=u16(u8,5);
+      const fill=u8[11];
+      ctx.beginPath();
+      ctx.arc(cx,cy,r,0,Math.PI*2);
+      if (fill) { ctx.fillStyle=cssrgb(u8,7); ctx.fill(); }
+      else       { ctx.strokeStyle=cssrgb(u8,7); ctx.lineWidth=1; ctx.stroke(); }
+      break;
+    }
+    case OP.TRIANGLE: {
+      const fill=u8[15];
+      ctx.beginPath();
+      ctx.moveTo(u16(u8,1), u16(u8,3));
+      ctx.lineTo(u16(u8,5), u16(u8,7));
+      ctx.lineTo(u16(u8,9), u16(u8,11));
+      ctx.closePath();
+      if (fill) { ctx.fillStyle=cssrgb(u8,12); ctx.fill(); }
+      else       { ctx.strokeStyle=cssrgb(u8,12); ctx.lineWidth=1; ctx.stroke(); }
+      break;
+    }
+    case OP.TEXT: {
+      const x=u16(u8,1),y=u16(u8,3);
+      const font=u8[5];
+      const rgb=u32rgb(u8,6);
+      const text=new TextDecoder().decode(u8.slice(10));
+      if (font===0) {
+        drawText8(x,y,rgb,text);
+      } else if (font===1) {
+        /* 16x16: scale up 8x8 */
+        ctx.save();
+        ctx.translate(x,y); ctx.scale(2,2);
+        drawText8(0,0,rgb,text);
+        ctx.restore();
+      } else {
+        /* System monospace fallback */
+        ctx.fillStyle = cssrgb(u8,6);
+        ctx.font = '14px monospace';
+        ctx.fillText(text,x,y+14);
+      }
+      break;
+    }
+    case OP.BMP: {
+      const x=u16(u8,1),y=u16(u8,3),w=u16(u8,5),h=u16(u8,7);
+      const pixels = u8.slice(9);
+      const img = ctx.createImageData(w,h);
+      const d=img.data;
+      for(let i=0,o=0;i<w*h;i++,o+=3){
+        d[i*4]=pixels[o]; d[i*4+1]=pixels[o+1];
+        d[i*4+2]=pixels[o+2]; d[i*4+3]=255;
+      }
+      ctx.putImageData(img,x,y);
+      break;
+    }
+    case OP.CLEAR: {
+      const rgb = (u8[1]<<16)|(u8[2]<<8)|u8[3];
+      ctx.fillStyle = `#${rgb.toString(16).padStart(6,'0')}`;
+      ctx.fillRect(0,0,canvasW,canvasH);
+      break;
+    }
+    case OP.RESOLUTION: {
+      canvasW=u16(u8,1); canvasH=u16(u8,3);
+      canvas.width=canvasW; canvas.height=canvasH;
+      fitCanvas();
+      ctx.fillStyle='#000';
+      ctx.fillRect(0,0,canvasW,canvasH);
+      break;
+    }
+    case OP.SET_CLIPBOARD: {
+      const txt = new TextDecoder().decode(u8.slice(1));
+      navigator.clipboard.writeText(txt).catch(()=>{});
+      break;
+    }
+  }
+  frameCount++;
+}
+
+/* ── WebSocket connection ───────────────────────────────────── */
+function connect() {
+  const url = `ws://${location.host}/ws`;
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    dot.className='dot on';
+    connlabel.textContent='Connected';
+    showHud();
+  };
+  ws.onclose = () => {
+    dot.className='dot';
+    connlabel.textContent='Disconnected — retrying…';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => { ws.close(); };
+
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) {
+      dispatch(new Uint8Array(e.data));
+    }
+  };
+}
+
+/* ── input → server ─────────────────────────────────────────── */
+const EV = { MOUSE:0x10, KEY:0x11, CLIPBOARD:0x12 };
+
+function sendMouse(buttons) {
+  if (!ws || ws.readyState!==1) return;
+  const b = new Uint8Array(7);
+  const v = new DataView(b.buffer);
+  b[0]=EV.MOUSE;
+  v.setInt16(1,lastMX,false); v.setInt16(3,lastMY,false);
+  b[5]=buttons; b[6]=0;
+  ws.send(b);
+}
+function sendKey(code) {
+  if (!ws || ws.readyState!==1) return;
+  const b = new Uint8Array(5);
+  const v = new DataView(b.buffer);
+  b[0]=EV.KEY;
+  v.setUint32(1,code,false);
+  ws.send(b);
+}
+function sendClipboard(txt) {
+  if (!ws || ws.readyState!==1) return;
+  const enc = new TextEncoder().encode(txt);
+  const b = new Uint8Array(1+enc.length);
+  b[0]=EV.CLIPBOARD; b.set(enc,1);
+  ws.send(b);
+}
+
+/* throttle mousemove to ~60 reports/sec */
+let lastMX=0,lastMY=0,lastButtons=0,mousePending=false;
+function schedMouse(x,y,buttons){
+  lastMX=x; lastMY=y; lastButtons=buttons;
+  coordsEl.textContent=`x:${x} y:${y}`;
+  if(mousePending) return;
+  mousePending=true;
+  requestAnimationFrame(()=>{ mousePending=false; sendMouse(lastButtons); });
+}
+
+/* canvas coordinates accounting for CSS scaling */
+function canvasXY(e) {
+  const r=canvas.getBoundingClientRect();
+  return [
+    Math.round((e.clientX-r.left)*(canvasW/r.width)),
+    Math.round((e.clientY-r.top) *(canvasH/r.height))
+  ];
+}
+
+canvas.addEventListener('mousemove', e=>{
+  const [x,y]=canvasXY(e);
+  schedMouse(x,y,lastButtons);
+});
+canvas.addEventListener('mousedown', e=>{
+  const [x,y]=canvasXY(e);
+  const m=(e.buttons&1)|((e.buttons&2));
+  schedMouse(x,y,m);
+});
+canvas.addEventListener('mouseup', e=>{
+  const [x,y]=canvasXY(e);
+  schedMouse(x,y,0);
+});
+canvas.addEventListener('contextmenu', e=>e.preventDefault());
+
+document.addEventListener('keydown', e=>{
+  sendKey(e.keyCode|(e.shiftKey?0x10000:0)|(e.ctrlKey?0x20000:0)|(e.altKey?0x40000:0));
+});
+
+/* ── canvas sizing ──────────────────────────────────────────── */
+function fitCanvas() {
+  const aw=window.innerWidth, ah=window.innerHeight;
+  const scale=Math.min(aw/canvasW, ah/canvasH);
+  canvas.style.width  = Math.floor(canvasW*scale)+'px';
+  canvas.style.height = Math.floor(canvasH*scale)+'px';
+}
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+/* ── fullscreen ─────────────────────────────────────────────── */
+document.getElementById('btnFs').onclick = () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+};
+document.addEventListener('fullscreenchange', fitCanvas);
+document.addEventListener('dblclick', ()=>{
+  if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+});
+
+/* ── clipboard sync button ──────────────────────────────────── */
+document.getElementById('btnClip').onclick = async () => {
+  try {
+    const txt = await navigator.clipboard.readText();
+    sendClipboard(txt);
+  } catch(e) { console.warn('Clipboard read failed', e); }
+};
+
+/* ── HUD auto-hide ──────────────────────────────────────────── */
+function showHud(){
+  hudEl.classList.remove('hide');
+  clearTimeout(hudTimer);
+  hudTimer=setTimeout(()=>hudEl.classList.add('hide'),3000);
+}
+document.addEventListener('mousemove', showHud);
+document.addEventListener('keydown', showHud);
+
+/* ── FPS counter ─────────────────────────────────────────────── */
+setInterval(()=>{
+  const now=performance.now();
+  const fps=Math.round(frameCount/(( now-lastFpsTime)/1000));
+  frameCount=0; lastFpsTime=now;
+  fpsEl.textContent=fps+' fps';
+}, 1000);
+
+/* ── boot ───────────────────────────────────────────────────── */
+canvas.width=canvasW; canvas.height=canvasH;
+ctx.fillStyle='#000'; ctx.fillRect(0,0,canvasW,canvasH);
+connect();
+</script>
+</body>
+</html>
