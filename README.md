@@ -186,18 +186,6 @@ text = wd.getclipboard()  # read what browser last sent
 - **FPS counter**: shows draw frames/sec received  
 - Canvas scales to fit window while keeping pixel-perfect rendering  
 
----
-
-## Performance tips
-
-1. **Batch draws** — send all primitives, then sleep. Don't call `poll()` between every pixel.  
-2. **Use `writebmp`** for large image updates — one frame vs. thousands of `writepixel` calls.  
-3. **C extension** gives ~3× lower per-call overhead vs. pure Python.  
-4. **Reduce resolution** for slower MCUs: `setresolution(320, 240)` at 60 fps feels very smooth.  
-5. The browser renders asynchronously — you don't need to wait for an ACK.  
-
----
-
 ## File layout
 
 ```
@@ -223,4 +211,4 @@ webdisplay/
 
 ## License
 
-MIT — do whatever you want with it.
+GPL
