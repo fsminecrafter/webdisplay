@@ -19,7 +19,7 @@ WEBDISPLAY_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # T-AMOLED hardware: ESP32-S3, 16 MB flash, 8 MB octal PSRAM
 BOARD="ESP32_GENERIC_S3"
-BOARD_VARIANT="FLASH_16M_SPIRAM_OCT"
+BOARD_VARIANT="SPIRAM_OCT"
 
 PORT="${PORT:-}"          # leave empty for auto-detect
 BAUD="${BAUD:-460800}"
