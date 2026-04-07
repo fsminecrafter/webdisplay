@@ -32,9 +32,12 @@
   /* ESP32 / lwIP */
   #include "lwip/sockets.h"
   #include "lwip/netdb.h"
+  #include <fcntl.h>
+
   #define SOCK_NONBLOCK_SET(fd) \
-      do { int f=1; ioctlsocket(fd,FIONBIO,&f); } while(0)
-  #define CLOSESOCK(fd)         close(fd)
+    fcntl(fd, F_SETFL, O_NONBLOCK)
+
+  #define CLOSESOCK(fd) close(fd)
 #endif
 
 #define STATIC static
