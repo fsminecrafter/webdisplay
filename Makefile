@@ -6,9 +6,10 @@
 MPY_DIR ?= $(HOME)/micropython
 
 # ── LilyGO T-AMOLED ESP32-S3 settings ────────────────────────
-# 16 MB flash, 8 MB octal PSRAM — matches the RM67162 AMOLED board
+# T-AMOLED hardware: ESP32-S3, 16 MB flash, 8 MB octal PSRAM
+# BOARD_VARIANT=SPIRAM_OCT enables octal PSRAM (required for T-AMOLED's RM67162 display)
 TAMOLED_BOARD         := ESP32_GENERIC_S3
-TAMOLED_BOARD_VARIANT := FLASH_16M_SPIRAM_OCT
+TAMOLED_BOARD_VARIANT := SPIRAM_OCT
 TAMOLED_PORT          ?=           # e.g. /dev/ttyUSB0 or COM3 (leave empty = auto)
 TAMOLED_BAUD          ?= 460800
 
