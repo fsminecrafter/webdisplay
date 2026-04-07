@@ -37,6 +37,8 @@
   #define CLOSESOCK(fd)         close(fd)
 #endif
 
+#define STATIC static
+
 /* ── constants ───────────────────────────────────────────────────── */
 #define WD_PORT       6868
 #define WD_MAX_CONN   4
