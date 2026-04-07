@@ -2,6 +2,10 @@
 
 A fast framebuffer display library for MicroPython — renders to a browser window over WebSocket/HTTP on port **6868**. Supports mouse, keyboard, clipboard input. Fullscreenable.
 
+Quick command to build for esp32-s3
+
+```git clone htps://github.com/fsminecrafter/webdisplay.git && cd webdisplay &chmod +xbuildesp.sh && ./buildesp.sh```
+
 ## Architecture
 
 ```
