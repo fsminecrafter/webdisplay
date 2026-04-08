@@ -299,28 +299,52 @@ function dispatch(u8) {
 }
 
 /* ── WebSocket connection ───────────────────────────────────── */
+/* The server is a tiny C implementation on the ESP32 — connect directly
+ * to the same host:port the page was served from, path /ws. */
+let retryDelay = 1000;  /* ms — doubles on each failure, caps at 8s */
+
 function connect() {
+  /* Build the WebSocket URL from the page origin so it works regardless
+   * of the device IP. location.host includes the port (e.g. 192.168.1.x:6868). */
   const url = `ws://${location.host}/ws`;
-  ws = new WebSocket(url);
+  connlabel.textContent = 'Connecting…';
+  dot.className = 'dot';
+
+  try {
+    ws = new WebSocket(url);
+  } catch(e) {
+    scheduleReconnect();
+    return;
+  }
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
-    dot.className='dot on';
-    connlabel.textContent='Connected';
+    retryDelay = 1000;           /* reset backoff on success */
+    dot.className = 'dot on';
+    connlabel.textContent = 'Connected';
     showHud();
   };
-  ws.onclose = () => {
-    dot.className='dot';
-    connlabel.textContent='Disconnected — retrying…';
-    setTimeout(connect, 2000);
+
+  ws.onclose = (ev) => {
+    dot.className = 'dot';
+    connlabel.textContent = `Disconnected — retrying in ${retryDelay/1000}s…`;
+    scheduleReconnect();
   };
-  ws.onerror = () => { ws.close(); };
+
+  /* onerror is always followed by onclose; just let onclose handle retry */
+  ws.onerror = () => {};
 
   ws.onmessage = (e) => {
     if (e.data instanceof ArrayBuffer) {
       dispatch(new Uint8Array(e.data));
     }
   };
+}
+
+function scheduleReconnect() {
+  const delay = retryDelay;
+  retryDelay = Math.min(retryDelay * 2, 8000);  /* exponential backoff, max 8s */
+  setTimeout(connect, delay);
 }
 
 /* ── input → server ─────────────────────────────────────────── */

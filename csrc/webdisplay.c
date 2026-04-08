@@ -18,6 +18,14 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+#define WD_DEBUG 1
+
+#if WD_DEBUG
+  #define DBG(...) mp_printf(&mp_plat_print, __VA_ARGS__)
+#else
+  #define DBG(...)
+#endif
+
 /* ── platform socket shim ────────────────────────────────────────── */
 #if defined(__unix__) || defined(__APPLE__)
   #include <sys/socket.h>
@@ -133,7 +141,11 @@ static void wd_accept_new(void) {
     socklen_t len = sizeof(addr);
     int fd = accept(wd.server_fd, (struct sockaddr*)&addr, &len);
     if (fd < 0) return;
+
+    DBG("New client connected\n");
+
     SOCK_NONBLOCK_SET(fd);
+
     for (int i = 0; i < WD_MAX_CONN; i++) {
         if (wd.client_fd[i] < 0) {
             wd.client_fd[i] = fd;
@@ -142,13 +154,41 @@ static void wd_accept_new(void) {
             return;
         }
     }
-    CLOSESOCK(fd); /* no room */
+
+    DBG("No space for client\n");
+    CLOSESOCK(fd);
 }
 
 static void wd_fire_callback(mp_obj_t cb, mp_obj_t arg) {
     if (cb != MP_OBJ_NULL && cb != mp_const_none) {
         mp_call_function_1(cb, arg);
     }
+}
+
+static int send_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = buf;
+    size_t remaining = len;
+
+    while (remaining > 0) {
+        ssize_t n = send(fd, p, remaining, 0);
+
+        if (n < 0) {
+#if defined(__unix__) || defined(__APPLE__)
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+#endif
+            DBG("send_all error\n");
+            return -1;
+        }
+
+        if (n == 0) {
+            DBG("send_all closed\n");
+            return -1;
+        }
+
+        remaining -= n;
+        p += n;
+    }
+    return 0;
 }
 
 static void wd_process_event(uint8_t *data, size_t len) {
@@ -188,38 +228,144 @@ static void wd_process_event(uint8_t *data, size_t len) {
 
 static void wd_poll_client(int idx) {
     int fd = wd.client_fd[idx];
+
     if (!wd.ws_upgraded[idx]) {
-        /* try HTTP upgrade */
-        char hbuf[1024];
-        int n = recv(fd, hbuf, sizeof(hbuf)-1, 0);
-        if (n <= 0) { CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--; return; }
-        hbuf[n] = 0;
-        if (strstr(hbuf, "Upgrade: websocket")) {
-            ws_handshake(fd, hbuf);
+        char hbuf[4096];
+        int total = 0;
+
+        // Receive HTTP headers
+        for (;;) {
+            int space = (int)sizeof(hbuf) - 1 - total;
+            if (space <= 0) break;
+
+            int n = recv(fd, hbuf + total, space, MSG_DONTWAIT);
+
+            if (n < 0) {
+#if defined(__unix__) || defined(__APPLE__)
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+#endif
+                if (total == 0) return;
+                break;
+            }
+
+            if (n == 0) {
+                DBG("Client closed before headers\n");
+                CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--;
+                return;
+            }
+
+            total += n;
+            hbuf[total] = '\0';
+
+            if (strstr(hbuf, "\r\n\r\n")) break;
+        }
+
+        hbuf[total] = '\0';
+        DBG("---- HTTP REQUEST ----\n%s\n----------------------\n", hbuf);
+
+        // WebSocket upgrade
+        if (strstr(hbuf, "websocket")) {
+            DBG("WebSocket upgrade requested\n");
+            if (ws_handshake(fd, hbuf) < 0) {
+                DBG("WS handshake failed\n");
+                CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--;
+                return;
+            }
+            DBG("WS upgraded OK\n");
             wd.ws_upgraded[idx] = 1;
-            /* send current resolution */
+
             uint8_t msg[5] = {OP_RESOLUTION};
             put16(msg+1, (uint16_t)wd.width);
             put16(msg+3, (uint16_t)wd.height);
             ws_send_binary(fd, msg, 5);
-        } else if (strstr(hbuf, "GET / ") || strstr(hbuf, "GET /index.html")) {
-            /* serve HTML */
-            char hdr[128];
-            int hlen = snprintf(hdr, sizeof(hdr),
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-                "Content-Length: %zu\r\nConnection: close\r\n\r\n",
-                wd_html_len);
-            send(fd, hdr, hlen, 0);
-            send(fd, wd_html, wd_html_len, 0);
-            CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--;
+            return;
         }
+
+        // favicon handling
+        if (strstr(hbuf, "GET /favicon.ico")) {
+            DBG("Ignoring favicon\n");
+            CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--;
+            return;
+        }
+
+        // Serve main HTML page
+        if (strstr(hbuf, "GET / ")) {
+            DBG("Serving HTML\n");
+
+            char hdr[256];
+            int hlen = snprintf(hdr, sizeof(hdr),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html; charset=utf-8\r\n"
+                "Content-Length: %zu\r\n"
+                "Connection: close\r\n\r\n",
+                wd_html_len);
+
+            // ESP32-safe send_all with retry
+            #if defined(__unix__) || defined(__APPLE__)
+              #define ERR_WOULDBLOCK(x) ((x)==EAGAIN || (x)==EWOULDBLOCK)
+            #else
+              #define ERR_WOULDBLOCK(x) ((x)==EAGAIN)
+            #endif
+
+            const uint8_t *p = (const uint8_t*)hdr;
+            size_t remaining = hlen;
+            while (remaining > 0) {
+                ssize_t n = send(fd, p, remaining, 0);
+                if (n < 0) {
+                    if (ERR_WOULDBLOCK(errno)) continue;
+                    DBG("send_all error %d\n", errno);
+                    break;
+                }
+                remaining -= n;
+                p += n;
+            }
+
+            // Send HTML in 512-byte chunks
+            size_t offset = 0;
+            while (offset < wd_html_len) {
+                size_t chunk = (wd_html_len - offset > 512) ? 512 : wd_html_len - offset;
+                const uint8_t *cptr = wd_html + offset;
+                size_t rem = chunk;
+                while (rem > 0) {
+                    ssize_t n = send(fd, cptr, rem, 0);
+                    if (n < 0) {
+                        if (ERR_WOULDBLOCK(errno)) continue;
+                        DBG("send_all error %d\n", errno);
+                        rem = 0; // break inner loop
+                        break;
+                    }
+                    rem -= n;
+                    cptr += n;
+                }
+                offset += chunk;
+            }
+
+            mp_hal_delay_ms(10);  // give TCP stack time to flush
+            CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--;
+            return;
+        }
+
+        DBG("Unknown request\n");
+        CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--;
         return;
     }
-    /* WS frame */
-    uint8_t *payload; size_t plen;
+
+    /* WebSocket frame handling */
+    uint8_t *payload;
+    size_t plen;
+
     int r = ws_recv_frame(fd, wd.rx_buf, WD_BUF_SIZE, &payload, &plen);
-    if (r < 0) { CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--; return; }
-    if (r > 0) wd_process_event(payload, plen);
+
+    if (r < 0) {
+        DBG("WS client disconnected\n");
+        CLOSESOCK(fd); wd.client_fd[idx]=-1; wd.client_count--;
+        return;
+    }
+
+    if (r > 0) {
+        DBG("WS data received (%d bytes)\n", (int)plen);
+        wd_process_event(payload, plen);
+    }
 }
 
 /* ── MicroPython API ─────────────────────────────────────────────── */
