@@ -4,7 +4,9 @@ A fast framebuffer display library for MicroPython — renders to a browser wind
 
 Quick command to build for esp32-s3
 
-```git clone htps://github.com/fsminecrafter/webdisplay.git && cd webdisplay &chmod +xbuildesp.sh && ./buildesp.sh```
+```
+git clone htps://github.com/fsminecrafter/webdisplay.git && cd webdisplay &chmod +xbuildesp.sh && ./buildesp.sh
+```
 
 ## Architecture
 
